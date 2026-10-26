@@ -1,77 +1,264 @@
+# Native macOS interactive build runner for ARM64.
+# Run steps use Bash for strict error handling; SSH sessions use macOS's Zsh.
 name: macOS ARM64 Machine
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   macos-arm64:
     runs-on: macos-26
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ANALYTICS: "1"
+      SHELL: /bin/zsh
 
     steps:
-      - name: Checkout Code
+      - name: Verify macOS architecture and bootstrap Git LFS / OpenSSL
+        run: |
+          set -euo pipefail
+
+          actual_arch="$(uname -m)"
+          if [[ "$actual_arch" != "arm64" ]]; then
+            echo "::error::Expected arm64 but runner is $actual_arch"
+            exit 1
+          fi
+          command -v brew >/dev/null || {
+            echo "::error::Homebrew is missing from the macOS runner"
+            exit 1
+          }
+
+          # actions/checkout lfs:true needs git-lfs before checkout.
+          if ! git lfs version >/dev/null 2>&1; then
+            brew install git-lfs
+          fi
+          git lfs version
+
+          # /usr/bin/openssl on macOS may be LibreSSL: use Homebrew OpenSSL 3.
+          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
+          if [[ ! -x "$openssl_bin" ]]; then
+            brew install openssl@3
+          fi
+          openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
+          [[ -x "$openssl_bin" ]] || {
+            echo "::error::OpenSSL 3 installation failed"
+            exit 1
+          }
+          "$openssl_bin" version
+          echo "$(dirname "$openssl_bin")" >> "$GITHUB_PATH"
+
+      - name: Checkout code and Git LFS payload
         uses: actions/checkout@v4
         with:
           lfs: true
+          persist-credentials: false
 
-      - name: Decrypt Payload
+      - name: Decrypt and test encrypted payload
+        env:
+          ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
         run: |
-          openssl enc -aes-256-cbc -d -pbkdf2 \
+          set -euo pipefail
+
+          if [[ -z "${ZIP_PASSWORD:-}" ]]; then
+            echo "::error::Repository secret ZIP_PASSWORD is missing or empty"
+            exit 1
+          fi
+          [[ -s payload.zip.enc ]] || {
+            echo "::error::payload.zip.enc does not exist or is empty"
+            exit 1
+          }
+
+          "$(brew --prefix openssl@3)/bin/openssl" enc \
+            -aes-256-cbc -d -pbkdf2 \
             -in payload.zip.enc \
             -out payload.zip \
-            -k "${{ secrets.ZIP_PASSWORD }}"
+            -pass env:ZIP_PASSWORD
 
-      - name: Extract Payload
+          # Catch bad passwords, truncated downloads, and malformed ZIPs early.
+          unzip -tqq payload.zip
+
+      - name: Extract payload to workspace
         run: |
-          unzip -q payload.zip -d ./extracted_files
-          
-      - name: Install Required Dependencies
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/extracted_files"
+          unzip -q payload.zip -d "$GITHUB_WORKSPACE/extracted_files"
+
+          if [[ -z "$(find "$GITHUB_WORKSPACE/extracted_files" -mindepth 1 -print -quit)" ]]; then
+            echo "::error::Encrypted payload extracted no files"
+            exit 1
+          fi
+          echo "Extracted payload into: $GITHUB_WORKSPACE/extracted_files"
+
+      - name: Install native macOS build dependencies
         run: |
-          echo "Installing dependencies (skipping slow Homebrew updates)..."
-          export HOMEBREW_NO_AUTO_UPDATE=1
-          export HOMEBREW_NO_INSTALL_CLEANUP=1
-          brew install maven go python3 imagemagick openssl
-          
-          echo "Verifying dependency versions..."
+          set -euo pipefail
+          # Go from Homebrew is current; no manual Go tarball is necessary.
+          # Zsh completion is built into macOS; bash-completion supports Bash 3.2.
+          brew install maven go python imagemagick bash-completion
+
+      - name: Install and configure Oracle JDK 25 (ARM64)
+        run: |
+          set -euo pipefail
+
+          archive="$RUNNER_TEMP/oracle-jdk-25-arm64.tar.gz"
+          url="https://download.oracle.com/java/25/latest/jdk-25_macos-aarch64_bin.tar.gz"
+
+          curl --fail --location --show-error --silent --retry 3 \
+            --retry-delay 3 --output "$archive" "$url"
+          tar -tzf "$archive" >/dev/null
+
+          # A user-local JDK is sufficient, avoids sudo and is visible to java_home.
+          install_root="$HOME/Library/Java/JavaVirtualMachines"
+          mkdir -p "$install_root"
+          tar -xzf "$archive" -C "$install_root"
+          rm -f "$archive"
+
+          jdk_bundle="$(find "$install_root" -maxdepth 1 -type d -name 'jdk-25*.jdk' -print -quit)"
+          if [[ -z "$jdk_bundle" ]]; then
+            echo "::error::Oracle archive did not contain a JDK 25 .jdk bundle"
+            exit 1
+          fi
+          java_home="$jdk_bundle/Contents/Home"
+          for tool in java javac jpackage jlink; do
+            [[ -x "$java_home/bin/$tool" ]] || {
+              echo "::error::Missing $tool in Oracle JDK: $java_home"
+              exit 1
+            }
+          done
+
+          echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
+          echo "$java_home/bin" >> "$GITHUB_PATH"
+
+          # GITHUB_PATH applies to subsequent steps; verify this step explicitly.
+          "$java_home/bin/java" -version
+          "$java_home/bin/javac" -version
+          "$java_home/bin/jpackage" --version
+
+      - name: Verify toolchains and macOS packaging utilities
+        run: |
+          set -euo pipefail
+          echo "Architecture: $(uname -m)"
+          echo "Runner: $(sw_vers -productVersion)"
+          echo "JAVA_HOME: $JAVA_HOME"
+          java -version
+          javac -version
+          jpackage --version
+          jlink --version
           mvn -version
           go version
           python3 --version
-          zip -v | head -n 2
-          unzip -v | head -n 2
-          magick -version
-          openssl version
+          magick -version | sed -n '1,2p'
+          "$(brew --prefix openssl@3)/bin/openssl" version
+          zip -v | sed -n '1,2p'
+          unzip -v | sed -n '1,2p'
 
-      - name: Install and Configure Oracle Java 25
-        run: |
-          echo "Downloading Oracle JDK 25 for macOS ARM64..."
-          curl -L -o jdk-25.tar.gz "https://download.oracle.com/java/25/latest/jdk-25_macos-aarch64_bin.tar.gz"
-          
-          echo "Extracting JDK..."
-          sudo mkdir -p /Library/Java/JavaVirtualMachines
-          sudo tar -xzf jdk-25.tar.gz -C /Library/Java/JavaVirtualMachines/
-          
-          JDK_HOME_DIR=$(ls -d /Library/Java/JavaVirtualMachines/jdk-25*.jdk/Contents/Home | head -n 1)
-          echo "JDK installed at: $JDK_HOME_DIR"
-          
-          echo "Configuring environment variables..."
-          echo "JAVA_HOME=${JDK_HOME_DIR}" >> $GITHUB_ENV
-          echo "${JDK_HOME_DIR}/bin" >> $GITHUB_PATH
-          
-          echo "Verifying Java versions..."
-          java -version
-          javac -version
+          # Native macOS equivalents of Linux desktop/packaging utilities.
+          for tool in file codesign hdiutil ditto iconutil sips pkgbuild productbuild xcrun; do
+            command -v "$tool" >/dev/null || {
+              echo "::error::Required macOS utility missing: $tool"
+              exit 1
+            }
+          done
+          xcrun --find clang
 
-      - name: Configure SSH Keepalive for Upterm
+      - name: Configure interactive Zsh and Bash sessions
         run: |
-          mkdir -p ~/.ssh
-          cat << 'EOF' >> ~/.ssh/config
+          set -euo pipefail
+
+          # GitHub PATH/JAVA_HOME step exports are not necessarily read by
+          # interactive SSH login shells. Persist only public toolchain paths.
+          brew_prefix="$(brew --prefix)"
+          openssl_prefix="$(brew --prefix openssl@3)"
+          {
+            printf 'export JAVA_HOME="%s"\n' "$JAVA_HOME"
+            printf 'export PATH="$JAVA_HOME/bin:%s/bin:%s/bin:$PATH"\n' "$brew_prefix" "$openssl_prefix"
+            printf 'export CLICOLOR=1\n'
+          } > "$HOME/.unix-runner-env"
+
+          cat >> "$HOME/.zprofile" <<'EOF'
+          # unix-runner: login shell toolchain
+          [[ -f "$HOME/.unix-runner-env" ]] && source "$HOME/.unix-runner-env"
+          EOF
+
+          cat >> "$HOME/.zshrc" <<'EOF'
+          # unix-runner: interactive Zsh
+          [[ -f "$HOME/.unix-runner-env" ]] && source "$HOME/.unix-runner-env"
+          [[ -o interactive ]] || return
+          export TERM="${TERM:-xterm-256color}"
+          HISTFILE="$HOME/.zsh_history"
+          HISTSIZE=10000
+          SAVEHIST=20000
+          setopt HIST_IGNORE_DUPS HIST_REDUCE_BLANKS SHARE_HISTORY
+          autoload -Uz colors compinit
+          colors
+          compinit -i
+          PROMPT='%B%F{green}%n@%m%f:%F{blue}%~%f%b %# '
+          alias ls='ls -G'
+          alias ll='ls -alFG'
+          alias la='ls -AG'
+          alias l='ls -CFG'
+          if echo test | grep --color=auto test >/dev/null 2>&1; then
+            alias grep='grep --color=auto'
+          fi
+          EOF
+
+          cat >> "$HOME/.bashrc" <<'EOF'
+          # unix-runner: interactive Bash (including Apple's Bash 3.2)
+          [[ -f "$HOME/.unix-runner-env" ]] && source "$HOME/.unix-runner-env"
+          case "$-" in *i*) ;; *) return ;; esac
+          export TERM="${TERM:-xterm-256color}"
+          HISTCONTROL=ignoreboth:erasedups
+          HISTSIZE=10000
+          HISTFILESIZE=20000
+          shopt -s checkwinsize
+          PS1='\[\033[1;32m\]\u@\h\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
+          alias ls='ls -G'
+          alias ll='ls -alFG'
+          alias la='ls -AG'
+          alias l='ls -CFG'
+          if echo test | grep --color=auto test >/dev/null 2>&1; then
+            alias grep='grep --color=auto'
+          fi
+          if [[ -f "$HOME/.unix-runner-env" ]] && command -v brew >/dev/null; then
+            bash_completion="$(brew --prefix)/etc/bash_completion"
+            [[ ! -f "$bash_completion" ]] || source "$bash_completion"
+          fi
+          EOF
+
+          cat >> "$HOME/.bash_profile" <<'EOF'
+          # unix-runner: Bash login shell
+          [[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
+          EOF
+
+          # Test parsing, without relying on a remote terminal being connected.
+          for shell_file in "$HOME/.bashrc" "$HOME/.bash_profile"; do
+            /bin/bash -n "$shell_file"
+          done
+          for shell_file in "$HOME/.zshrc" "$HOME/.zprofile"; do
+            /bin/zsh -n "$shell_file"
+          done
+
+      - name: Configure SSH keepalive for Upterm
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ssh"
+          chmod 700 "$HOME/.ssh"
+          cat >> "$HOME/.ssh/config" <<'EOF'
           Host uptermd.upterm.dev
               ServerAliveInterval 30
               ServerAliveCountMax 3
           EOF
-          chmod 600 ~/.ssh/config
+          chmod 600 "$HOME/.ssh/config"
 
-      - name: Start Secure Interactive SSH Session
+      - name: Start secure interactive SSH session
         uses: owenthereal/action-upterm@v2
         with:
           limit-access-to-users: 'jgfPereira'
