@@ -1,5 +1,3 @@
-# Native macOS interactive build runner for ARM64.
-# Run steps use Bash for strict error handling; SSH sessions use macOS's Zsh.
 name: macOS ARM64 Machine
 
 on:
@@ -36,13 +34,11 @@ jobs:
             exit 1
           }
 
-          # actions/checkout lfs:true needs git-lfs before checkout.
           if ! git lfs version >/dev/null 2>&1; then
             brew install git-lfs
           fi
           git lfs version
 
-          # /usr/bin/openssl on macOS may be LibreSSL: use Homebrew OpenSSL 3.
           openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
           if [[ ! -x "$openssl_bin" ]]; then
             brew install openssl@3
@@ -82,7 +78,6 @@ jobs:
             -out payload.zip \
             -pass env:ZIP_PASSWORD
 
-          # Catch bad passwords, truncated downloads, and malformed ZIPs early.
           unzip -tqq payload.zip
 
       - name: Extract payload to workspace
@@ -115,7 +110,6 @@ jobs:
             --retry-delay 3 --output "$archive" "$url"
           tar -tzf "$archive" >/dev/null
 
-          # A user-local JDK is sufficient, avoids sudo and is visible to java_home.
           install_root="$HOME/Library/Java/JavaVirtualMachines"
           mkdir -p "$install_root"
           tar -xzf "$archive" -C "$install_root"
@@ -137,7 +131,6 @@ jobs:
           echo "JAVA_HOME=$java_home" >> "$GITHUB_ENV"
           echo "$java_home/bin" >> "$GITHUB_PATH"
 
-          # GITHUB_PATH applies to subsequent steps; verify this step explicitly.
           "$java_home/bin/java" -version
           "$java_home/bin/javac" -version
           "$java_home/bin/jpackage" --version
@@ -160,7 +153,6 @@ jobs:
           zip -v | sed -n '1,2p'
           unzip -v | sed -n '1,2p'
 
-          # Native macOS equivalents of Linux desktop/packaging utilities.
           for tool in file codesign hdiutil ditto iconutil sips pkgbuild productbuild xcrun; do
             command -v "$tool" >/dev/null || {
               echo "::error::Required macOS utility missing: $tool"
@@ -173,8 +165,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # GitHub PATH/JAVA_HOME step exports are not necessarily read by
-          # interactive SSH login shells. Persist only public toolchain paths.
           brew_prefix="$(brew --prefix)"
           openssl_prefix="$(brew --prefix openssl@3)"
           {
@@ -184,12 +174,10 @@ jobs:
           } > "$HOME/.unix-runner-env"
 
           cat >> "$HOME/.zprofile" <<'EOF'
-          # unix-runner: login shell toolchain
           [[ -f "$HOME/.unix-runner-env" ]] && source "$HOME/.unix-runner-env"
           EOF
 
           cat >> "$HOME/.zshrc" <<'EOF'
-          # unix-runner: interactive Zsh
           [[ -f "$HOME/.unix-runner-env" ]] && source "$HOME/.unix-runner-env"
           [[ -o interactive ]] || return
           export TERM="${TERM:-xterm-256color}"
@@ -211,7 +199,6 @@ jobs:
           EOF
 
           cat >> "$HOME/.bashrc" <<'EOF'
-          # unix-runner: interactive Bash (including Apple's Bash 3.2)
           [[ -f "$HOME/.unix-runner-env" ]] && source "$HOME/.unix-runner-env"
           case "$-" in *i*) ;; *) return ;; esac
           export TERM="${TERM:-xterm-256color}"
@@ -234,11 +221,9 @@ jobs:
           EOF
 
           cat >> "$HOME/.bash_profile" <<'EOF'
-          # unix-runner: Bash login shell
           [[ -f "$HOME/.bashrc" ]] && source "$HOME/.bashrc"
           EOF
 
-          # Test parsing, without relying on a remote terminal being connected.
           for shell_file in "$HOME/.bashrc" "$HOME/.bash_profile"; do
             /bin/bash -n "$shell_file"
           done
