@@ -129,7 +129,7 @@ jobs:
           blue="\[\e[34m\]"
           yellow="\[\e[33m\]"
 
-          PS1="${bold}${green}\u@\h${reset}:${bold}${blue}\w${reset}\$ "
+          PS1="${bold}${green}linux${reset}:${bold}${blue}\W${reset}\$ "
 
           alias ls='ls --color=auto'
           alias ll='ls -alF'

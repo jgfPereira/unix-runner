@@ -188,7 +188,7 @@ jobs:
           autoload -Uz colors compinit
           colors
           compinit -i
-          PROMPT='%B%F{green}%n@%m%f:%F{blue}%~%f%b %# '
+          PROMPT='%B%F{green}mac%f%b:%F{blue}%1~%f %# '
           alias ls='ls -G'
           alias ll='ls -alFG'
           alias la='ls -AG'
@@ -206,7 +206,7 @@ jobs:
           HISTSIZE=10000
           HISTFILESIZE=20000
           shopt -s checkwinsize
-          PS1='\[\033[1;32m\]\u@\h\[\033[0m\]:\[\033[1;34m\]\w\[\033[0m\]\$ '
+          PS1='\[\033[1;32m\]mac\[\033[0m\]:\[\033[1;34m\]\W\[\033[0m\]\$ '
           alias ls='ls -G'
           alias ll='ls -alFG'
           alias la='ls -AG'
