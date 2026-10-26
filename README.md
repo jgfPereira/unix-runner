@@ -4,7 +4,7 @@
 
 # 🐧 🍎 Unix Runner
 
-### Four architectures. Two operating systems. One interactive build environment.
+### Four runner configurations. Two operating systems. Two CPU architectures.
 
 **On-demand GitHub Actions runners for building, packaging, and debugging native Unix applications over SSH.**
 
@@ -23,7 +23,7 @@
 
 **Unix Runner** turns an ordinary workflow dispatch into a temporary, remotely accessible development machine. Each run provisions the relevant build tools, decrypts an encrypted source payload, and opens a restricted [Upterm](https://github.com/owenthereal/action-upterm) SSH session for hands-on work.
 
-It is designed for workloads where **native host architecture matters**, such as Java `jpackage` application images, macOS `.app` / `.dmg` packaging, and Linux AppImage creation. It is particularly useful for building the **iSign** Java desktop application across x64 and ARM64.
+It is designed for workloads where **native operating systems and CPU architectures matter**: Java `jpackage` application images, macOS `.app` / `.dmg` / `.pkg` packaging, Linux AppImage creation, native Go programs, and other architecture-specific build or debugging tasks. The runners are **project-agnostic**: bring your own encrypted source payload and run the tools or build scripts appropriate to that project.
 
 > [!IMPORTANT]
 > These are **interactive provisioning workflows**, not fully unattended build-and-release pipelines. They prepare the environment and wait at the Upterm step. You run your build scripts in the SSH session and transfer the resulting files yourself. No executable is published automatically.
@@ -138,20 +138,33 @@ The workspace location is environment-specific. In the current setup, Linux cont
 
 ### 4. Run your build
 
-If the extracted archive contains the iSign project with the expected layout:
+Inspect the extracted archive, identify the project directory, and run the build commands appropriate to that project:
 
 ```bash
-cd "$GITHUB_WORKSPACE/extracted_files/isign"
+cd "$GITHUB_WORKSPACE/extracted_files"
+ls -la
 
-# Inspect available build scripts
-ls -la scripts/
+# Locate common build entry points.
+find . -maxdepth 4 -type f \
+  \( -name 'pom.xml' -o -name 'go.mod' -o -name 'Makefile' -o -name 'build*.sh' \) \
+  -print
 
-# Example: native macOS packaging without signing
-chmod +x scripts/build-macos.sh
-./scripts/build-macos.sh --skip-signing
+# Example: build a Maven project (replace the directory name).
+cd "$GITHUB_WORKSPACE/extracted_files/my-project"
+mvn clean package
 ```
 
-**Scripts inside the encrypted payload are separate from this repository.** The workflow provisions the environment, but the build behavior and artifact paths are defined by those scripts. The example above assumes `scripts/build-macos.sh` exists in the extracted project.
+For projects with their own platform-specific scripts, run the relevant script from the project directory. For example:
+
+```bash
+# macOS: illustrative unsigned packaging command.
+./scripts/build-macos.sh --skip-signing
+
+# Linux: illustrative native packaging command.
+./scripts/build-linux.sh
+```
+
+The script names and options above are **examples, not built-in commands**. **Unix Runner provisions the machine; your encrypted payload supplies the project, build scripts, configuration, and build outputs.** Nothing in this repository requires any specific application name or project layout.
 
 ### 5. Collect your build output
 
@@ -166,19 +179,20 @@ find "$GITHUB_WORKSPACE/extracted_files" -type f \
 For macOS `.app` bundles, prefer an archive made using Apple's `ditto`, which preserves macOS metadata and symlinks:
 
 ```bash
-# Replace the example path with your actual .app location.
-ditto -c -k --keepParent "target/jpackage-output/iSign.app" "target/iSign-macos.zip"
+# Replace these example paths with your application's actual paths.
+ditto -c -k --keepParent "path/to/YourApp.app" "path/to/YourApp-macos.zip"
 ```
 
-You can attempt to retrieve an individual file using SCP and the same session-specific Upterm destination (with its actual absolute path):
+Retrieve an individual artifact using SCP and the session-specific Upterm destination. Use the artifact's **absolute path on the runner**, and execute this command on **your local machine**:
 
 ```bash
-# Run this on YOUR local computer, not inside the remote runner.
-scp -O -o ServerAliveInterval=30 -l 8192 \
+scp -o ServerAliveInterval=30 -l 8192 \
   '<SESSION_ID>@uptermd.upterm.dev:/ABSOLUTE/PATH/TO/ARTIFACT.zip' .
 ```
 
-`-O` selects legacy SCP mode on modern OpenSSH clients; it can help with SSH servers that do not provide SFTP. File transfer behavior depends on the Upterm version, so verify the method on your live session. The `-l 8192` option is a bandwidth cap of **8,192 Kbit/s** (about 1 MiB/s), not a speed guarantee.
+Modern OpenSSH uses SFTP for SCP transfers by default; **no `-O` option is needed in the standard command**. Some older or differently configured Upterm/SSH endpoints may require **legacy SCP mode**, which can be enabled by adding `-O` if the default transfer fails with an SFTP-related error. Conversely, if `-O` causes a transfer failure, leave it out. Use the transfer mode that works with your session and client.
+
+The `-l 8192` option caps bandwidth at **8,192 Kbit/s** (about 1 MiB/s), not a speed guarantee. Omit `-l 8192` if you do not want a bandwidth limit.
 
 ---
 
@@ -246,7 +260,7 @@ $GITHUB_WORKSPACE/
 ├── payload.zip.enc
 ├── payload.zip                  # Decrypted only on the temporary runner
 └── extracted_files/
-    └── isign/                   # Example extracted project layout
+    └── my-project/              # Example; actual layout comes from your ZIP
         ├── scripts/
         └── ...
 ```
