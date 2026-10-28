@@ -34,7 +34,7 @@ It is designed for workloads where **native operating systems and CPU architectu
 - **Oracle JDK 25** with `java`, `javac`, `jlink`, and `jpackage` available for Java desktop packaging.
 - **Go, Maven, Python, ImageMagick, OpenSSL, ZIP utilities**, and OS-specific packaging tools.
 - **Encrypted payload provisioning:** A GitHub Release asset (`payload.zip.enc`) is downloaded over HTTPS, decrypted using the `ZIP_PASSWORD` repository secret, and extracted on the runner. The asset is **publicly downloadable**; only its contents are encrypted.
-- **Encrypted build artifact delivery:** After Upterm, staged output is ZIP-packaged, encrypted using `ZIP_PASSWORD`, and uploaded to the workflow run's **Artifacts** section. No project-specific output paths are hardcoded in the workflows.
+- **Encrypted build artifact delivery:** After Upterm, staged output is ZIP-packaged, encrypted using `ZIP_PASSWORD`, and uploaded to the workflow run's **Artifacts** section with a **3-day retention period**. No project-specific output paths are hardcoded in the workflows.
 - **Interactive SSH:** Upterm sessions restricted to the registered GitHub SSH keys of `jgfPereira`.
 - **Comfortable remote terminals:** colorized Zsh/Bash sessions on macOS and Bash on Linux, with aliases and completion support.
 - **Native packaging:** Apple's Xcode/macOS utilities on macOS; `appimagetool` and desktop integration utilities on Linux.
@@ -226,7 +226,7 @@ Simply closing the local terminal or disconnecting the SSH client **may leave th
 
 ### 7. Download and decrypt the build output
 
-Once the upload step finishes, open the workflow run under the [Actions tab](https://github.com/jgfPereira/unix-runner/actions). In its **Artifacts** section, select the entry matching the platform, such as `macos-arm64-build`.
+Once the upload step finishes, open the workflow run under the [Actions tab](https://github.com/jgfPereira/unix-runner/actions). In its **Artifacts** section, select the entry matching the platform, such as `macos-arm64-build`. **Download it within 3 days of upload**, before it expires automatically.
 
 The browser downloads a GitHub ZIP archive containing the encrypted file **`artifact.zip.enc`**. Extract that outer ZIP, then decrypt `artifact.zip.enc` using the same passphrase as `ZIP_PASSWORD`. If you prefer the GitHub CLI, it extracts the GitHub wrapper automatically:
 
@@ -276,7 +276,7 @@ The new workflow steps send the encrypted output using **GitHub Actions artifact
 | Behavior during relay disruption | Can hang or disconnect | Download independent of Upterm relay |
 | Preparation | Give local SCP the real remote output path | Copy output to a generic staging directory |
 | Encryption | SSH protects the transfer; downloaded file is otherwise unchanged | ZIP encrypted using `ZIP_PASSWORD` before upload |
-| Availability | While session and runner remain active | Until artifact expires or is removed |
+| Availability | While session and runner remain active | **3 days after upload**, unless removed earlier |
 
 > [!IMPORTANT]
 > **Uploading is optional, not the build itself.** You must create the build and stage its files manually during SSH. If no files are staged, the workflow **warns but does not fail**. An upload is attempted only after the Upterm step finishes or resumes. A job that is cancelled or reaches its timeout may never execute the upload steps.
@@ -347,7 +347,13 @@ Both allow subsequent GitHub Actions steps to run. `touch .../continue` can resu
 After Upterm, the four workflows run two additional steps:
 
 1. **Package and encrypt staged artifact:** if `artifact/` contains at least one file, create a ZIP in the runner's temporary directory, encrypt it with OpenSSL (`AES-256-CBC`, `PBKDF2`, salted) using `ZIP_PASSWORD`, and save **`artifact.zip.enc`** in the workspace. The temporary plaintext `artifact.zip` is deleted by the step's exit cleanup.
-2. **Upload encrypted build artifact:** `actions/upload-artifact@v4` uploads only `artifact.zip.enc`, with **`compression-level: 0`** because the file is already encrypted. If it does not exist, the action warns instead of failing.
+2. **Upload encrypted build artifact:** `actions/upload-artifact@v4` uploads only `artifact.zip.enc`, with **`compression-level: 0`** because the file is already encrypted and **`retention-days: 3`** so GitHub automatically expires it after three days. If the file does not exist, the action warns instead of failing.
+
+The retention setting is identical for all four platforms:
+
+```yaml
+retention-days: 3
+```
 
 ```mermaid
 flowchart LR
@@ -364,7 +370,7 @@ flowchart LR
 | Missing or empty staging directory | Emit a warning; no artifact is uploaded |
 | Missing `ZIP_PASSWORD` when staging exists | Fail safely; do not upload unencrypted content |
 | ZIP or encryption error | Packaging step fails; no intentional plaintext fallback |
-| Successful upload | Encrypted artifact becomes downloadable from that run |
+| Successful upload | Encrypted artifact becomes downloadable from that run for **3 days** |
 
 **Artifact names** identify the platform while keeping the project and original output path private:
 
@@ -382,7 +388,7 @@ flowchart LR
 
 **Method A — GitHub website:**
 
-1. Open the repository's [GitHub Actions page](https://github.com/jgfPereira/unix-runner/actions) and select the completed run.
+1. **Within 3 days of artifact upload**, open the repository's [GitHub Actions page](https://github.com/jgfPereira/unix-runner/actions) and select the completed run.
 2. Find the **Artifacts** section on the run summary, then download the relevant platform artifact, for example `macos-arm64-build`.
 3. Extract the ZIP downloaded by the browser (for example, `macos-arm64-build.zip`). Its contents include **`artifact.zip.enc`**.
 4. Decrypt `artifact.zip.enc` on your own computer, then extract the decrypted `artifact.zip` to access the output.
@@ -429,7 +435,7 @@ OpenSSL prompts for the same passphrase configured in the repository secret **`Z
 
 - **Public repository:** GitHub Actions artifacts can be downloaded by people with read access to the repository. Treat `artifact.zip.enc` as publicly accessible encrypted content and protect the secret with a strong, unique passphrase.
 - **Encryption:** the staged files are ZIP-packaged, then encrypted before upload. The decrypted staging files remain on the *temporary runner* until its workspace is removed; the workflow removes the temporary plaintext ZIP, not the original staged files.
-- **Retention:** the workflows do **not** set `retention-days`, so GitHub's configured repository retention applies. Workflow artifacts expire; download important builds before they are deleted. This is not a permanent release or backup system.
+- **Retention:** all four workflows explicitly set **`retention-days: 3`** in `actions/upload-artifact@v4`. Uploaded artifacts are kept for **3 days from upload**, then expire automatically (or sooner if manually deleted or a stricter repository policy applies). Download and back up important builds promptly; this is **temporary delivery, not permanent release or backup storage**. Changing the setting affects future uploads, not the expiry of already-uploaded artifacts.
 - **Limits and billing:** GitHub Actions storage and artifact upload limits apply separately from GitHub Releases and Git LFS. Large outputs require sufficient time and storage quota.
 - **Integrity:** OpenSSL `enc` with AES-256-CBC / PBKDF2 does not provide authenticated integrity. For important builds, verify a trusted SHA-256 checksum or a signature in addition to decrypting the file.
 
@@ -854,6 +860,13 @@ Confirm you copied at least one **file** into `$GITHUB_WORKSPACE/artifact/` **be
 </details>
 
 <details>
+<summary><strong>The build artifact was available, but has disappeared</strong></summary>
+
+Uploaded build artifacts automatically expire **3 days after upload** because each workflow uses `retention-days: 3`. Check the workflow run's Artifacts section and download outputs before expiry. If the artifact has expired or been deleted, it cannot be recovered from the temporary runner; rebuild and upload it again. This limit concerns **GitHub Actions build artifacts**, not the long-lived `runner-payload` GitHub Release asset.
+
+</details>
+
+<details>
 <summary><strong>Artifact upload or encryption fails</strong></summary>
 
 Check the two post-Upterm steps for details. If files were staged but `ZIP_PASSWORD` is missing, the workflow fails rather than upload plaintext. If the ZIP or OpenSSL command fails, inspect available disk space, file permissions, and the step log. If upload fails after encryption, check GitHub Actions availability, workflow artifact limits, storage quota, and artifact permissions. Use an authenticated GitHub account with repository access to download the artifact.
@@ -886,7 +899,7 @@ AppImage is intentionally **Linux only**; `APPIMAGE_EXTRACT_AND_RUN=1` supports 
 - **Restrict SSH access.** The workflows explicitly allow only the registered keys of `jgfPereira` through Upterm. Do not remove this restriction for jobs containing decrypted artifacts.
 - **Encrypt files before public storage.** The GitHub Release input asset and GitHub Actions build output are encrypted with the `ZIP_PASSWORD` passphrase. Keep the password strong, unique, and private. Never upload plaintext build outputs, archives, or credentials to public releases/artifacts.
 - **Stage deliberately.** The workflows upload only encrypted `artifact.zip.enc` but collect everything in `$GITHUB_WORKSPACE/artifact/`. Don't stage secrets or sensitive files accidentally. Original build paths are not hardcoded into the workflows, but artifact names and sizes can still be visible.
-- **Understand the lifespan.** Hosted runners are temporary. All files and changes not retrieved elsewhere disappear when the job ends. Workflow artifacts also expire under the repository's retention policy.
+- **Understand the lifespan.** Hosted runners are temporary. All files and changes not retrieved elsewhere disappear when the job ends. Uploaded build artifacts have a **3-day retention period**, so download and save them locally before they expire.
 - **Keep action permissions narrow.** The macOS jobs request `contents: read` and disable persisted checkout credentials. Linux remains container-based. No workflows require LFS checkout or write access to GitHub Releases for downloads.
 - **Manage toolchain drift.** Homebrew formula versions, Go latest-stable, Oracle JDK 25 patch levels, runner images, and `appimagetool` continuous releases can change between runs. Pin versions and action commit SHAs if you require reproducible, audited release builds.
 - **Account for usage and consistency.** GitHub Actions minutes and artifact storage have separate limits from Git LFS and GitHub Release assets. A connected SSH session consumes a running job, and the 30-minute job timeout includes artifact encryption/upload. The fixed `runner-payload` tag always refers to the currently uploaded input asset, so record its checksum when reproducibility matters.
