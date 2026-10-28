@@ -24,6 +24,7 @@ jobs:
           GIT_LFS_SKIP_SMUDGE: "1"
 
       - name: Download encrypted payload from GitHub Release
+        shell: bash
         run: |
           set -euo pipefail
           release_tag="runner-payload"
@@ -184,6 +185,7 @@ jobs:
           limit-access-to-users: 'jgfPereira'
 
       - name: Package and encrypt staged artifact
+        shell: bash
         env:
           ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
         run: |
@@ -220,4 +222,5 @@ jobs:
           path: artifact.zip.enc
           if-no-files-found: warn
           compression-level: 0
+          retention-days: 3
 
