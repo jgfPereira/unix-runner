@@ -56,7 +56,7 @@ jobs:
       - name: Download encrypted payload from GitHub Release
         run: |
           set -euo pipefail
-          release_tag="runner-payload-v1"
+          release_tag="runner-payload"
           download_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_tag}/payload.zip.enc"
 
           curl --fail --location --show-error --silent --retry 3 --retry-delay 5 \
