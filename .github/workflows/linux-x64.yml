@@ -182,3 +182,42 @@ jobs:
         uses: owenthereal/action-upterm@v2
         with:
           limit-access-to-users: 'jgfPereira'
+
+      - name: Package and encrypt staged artifact
+        env:
+          ZIP_PASSWORD: ${{ secrets.ZIP_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          staging_dir="$GITHUB_WORKSPACE/artifact"
+          if [[ ! -d "$staging_dir" ]] || [[ -z "$(find "$staging_dir" -mindepth 1 \( -type f -o -type l \) -print -quit)" ]]; then
+            echo "::warning::No build artifact found in artifact/; skipping upload."
+            exit 0
+          fi
+
+          if [[ -z "${ZIP_PASSWORD:-}" ]]; then
+            echo "::error::Repository secret ZIP_PASSWORD is missing or empty."
+            exit 1
+          fi
+
+          plain_zip="$RUNNER_TEMP/artifact.zip"
+          encrypted_zip="$GITHUB_WORKSPACE/artifact.zip.enc"
+          trap 'rm -f "$plain_zip"' EXIT
+
+          (cd "$staging_dir" && zip -qry "$plain_zip" .)
+          openssl enc -aes-256-cbc -salt -pbkdf2 \
+            -in "$plain_zip" \
+            -out "$encrypted_zip" \
+            -pass env:ZIP_PASSWORD
+
+          test -s "$encrypted_zip"
+          echo "Encrypted build artifact is ready for upload."
+
+      - name: Upload encrypted build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64-build
+          path: artifact.zip.enc
+          if-no-files-found: warn
+          compression-level: 0
+

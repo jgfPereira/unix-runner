@@ -13,7 +13,7 @@
 [![Architectures](https://img.shields.io/badge/CPU-x64%20%7C%20ARM64-1769AA?style=for-the-badge)](#runner-matrix)
 [![GitHub Actions](https://img.shields.io/badge/GitHub-Actions-2088FF?style=for-the-badge&logo=githubactions&logoColor=white)](https://github.com/jgfPereira/unix-runner/actions)
 
-**[Quick start](#quick-start)** · **[Runners](#runner-matrix)** · **[Release payload](#managing-the-encrypted-payload)** · **[Toolchains](#toolchains--platform-differences)** · **[Commands](#command-reference)** · **[Troubleshooting](#troubleshooting)**
+**[Quick start](#quick-start)** · **[Runners](#runner-matrix)** · **[Build artifacts](#encrypted-build-artifacts)** · **[Release payload](#managing-the-encrypted-payload)** · **[Toolchains](#toolchains--platform-differences)** · **[Commands](#command-reference)** · **[Troubleshooting](#troubleshooting)**
 
 </div>
 
@@ -26,7 +26,7 @@
 It is designed for workloads where **native operating systems and CPU architectures matter**: Java `jpackage` application images, macOS `.app` / `.dmg` / `.pkg` packaging, Linux AppImage creation, native Go programs, and other architecture-specific build or debugging tasks. The runners are **project-agnostic**: bring your own encrypted source payload and run the tools or build scripts appropriate to that project.
 
 > [!IMPORTANT]
-> These are **interactive provisioning workflows**, not fully unattended build-and-release pipelines. They prepare the environment and wait at the Upterm step. You run your build scripts in the SSH session and transfer the resulting files yourself. No executable is published automatically.
+> These are **interactive build environments**, not fully unattended build-and-release pipelines. The workflows prepare the machine and wait at Upterm; **you** run the actual build. After the session ends, they can **automatically encrypt and upload any output you have staged** as a GitHub Actions workflow artifact. No build is executed automatically, and nothing is published as a GitHub Release.
 
 ### What you get
 
@@ -34,6 +34,7 @@ It is designed for workloads where **native operating systems and CPU architectu
 - **Oracle JDK 25** with `java`, `javac`, `jlink`, and `jpackage` available for Java desktop packaging.
 - **Go, Maven, Python, ImageMagick, OpenSSL, ZIP utilities**, and OS-specific packaging tools.
 - **Encrypted payload provisioning:** A GitHub Release asset (`payload.zip.enc`) is downloaded over HTTPS, decrypted using the `ZIP_PASSWORD` repository secret, and extracted on the runner. The asset is **publicly downloadable**; only its contents are encrypted.
+- **Encrypted build artifact delivery:** After Upterm, staged output is ZIP-packaged, encrypted using `ZIP_PASSWORD`, and uploaded to the workflow run's **Artifacts** section. No project-specific output paths are hardcoded in the workflows.
 - **Interactive SSH:** Upterm sessions restricted to the registered GitHub SSH keys of `jgfPereira`.
 - **Comfortable remote terminals:** colorized Zsh/Bash sessions on macOS and Bash on Linux, with aliases and completion support.
 - **Native packaging:** Apple's Xcode/macOS utilities on macOS; `appimagetool` and desktop integration utilities on Linux.
@@ -49,7 +50,7 @@ It is designed for workloads where **native operating systems and CPU architectu
 
 All four workflows are **manual** (`workflow_dispatch`) and currently use a **30-minute job timeout**. The selected architecture is the architecture of the machine executing the native build; macOS jobs are not cross-compilation containers.
 
-### How a session starts
+### How a workflow runs
 
 ```mermaid
 flowchart TD
@@ -63,7 +64,14 @@ flowchart TD
     G --> H[Prepare architecture-specific toolchains]
     H --> I[Configure interactive shell and SSH]
     I --> J[Restricted Upterm session]
-    J --> K[Build, debug, package, and retrieve files]
+    J --> K[Build and stage output in artifact directory]
+    K --> L[End session or signal continue]
+    L --> M{Staged files present?}
+    M -->|Yes| N[ZIP and encrypt using ZIP_PASSWORD]
+    N --> O[Upload encrypted GitHub Actions artifact]
+    O --> P[Download and decrypt locally]
+    M -->|No| Q[Warn and finish without an upload]
+    K -. Optional direct transfer .-> R[SCP or SFTP]
 ```
 
 ## Quick start
@@ -167,9 +175,9 @@ For projects with their own platform-specific scripts, run the relevant script f
 
 The script names and options above are **examples, not built-in commands**. **Unix Runner provisions the machine; your encrypted payload supplies the project, build scripts, configuration, and build outputs.** Nothing in this repository requires any specific application name or project layout.
 
-### 5. Collect your build output
+### 5. Stage your finished build for encrypted upload
 
-Start by finding files in the SSH session:
+After building, find the output in your Upterm session:
 
 ```bash
 find "$GITHUB_WORKSPACE/extracted_files" -type f \
@@ -177,23 +185,253 @@ find "$GITHUB_WORKSPACE/extracted_files" -type f \
   -print
 ```
 
-For macOS `.app` bundles, prefer an archive made using Apple's `ditto`, which preserves macOS metadata and symlinks:
+Create the shared staging directory and **copy** the files you want to retrieve into it:
 
 ```bash
-# Replace these example paths with your application's actual paths.
-ditto -c -k --keepParent "path/to/YourApp.app" "path/to/YourApp-macos.zip"
+# Run inside the Upterm SSH session (Linux or macOS).
+mkdir -p "$GITHUB_WORKSPACE/artifact"
+
+# Example: substitute the actual built-file path; choose a generic staged name.
+cp "/path/to/your/build-output.zip" "$GITHUB_WORKSPACE/artifact/output.zip"
+
+# Confirm your upload candidates are present.
+ls -lh "$GITHUB_WORKSPACE/artifact"
 ```
 
-Retrieve an individual artifact using SCP and the session-specific Upterm destination. Use the artifact's **absolute path on the runner**, and execute this command on **your local machine**:
+The workflows inspect **only** `$GITHUB_WORKSPACE/artifact/` when preparing the upload. You can stage multiple files; the relative directory structure and filenames under `artifact/` will be included in the encrypted archive. **Copying is essential:** building a file somewhere under `extracted_files/` does not automatically stage it.
+
+For a macOS `.app` bundle, first package it with `ditto` to preserve macOS metadata and symlinks:
 
 ```bash
+# On the macOS runner; substitute the actual .app path.
+ditto -c -k --keepParent "/path/to/YourApp.app" \
+  "$GITHUB_WORKSPACE/artifact/output-macos.zip"
+```
+
+See [Encrypted build artifacts](#encrypted-build-artifacts) for more examples, including multiple outputs and the post-session encryption process.
+
+### 6. Finish the Upterm session to start the upload
+
+Only after all staged files are complete, run **one** of these commands in the Upterm session:
+
+```bash
+# End the shell, which lets the workflow continue.
+exit
+
+# Alternative (instead of exit): resume the workflow while still connected.
+# touch "$GITHUB_WORKSPACE/continue"
+```
+
+Simply closing the local terminal or disconnecting the SSH client **may leave the Upterm session running**, in which case the workflow has not reached the upload steps. Check the GitHub Actions run for **Package and encrypt staged artifact** and **Upload encrypted build artifact**.
+
+### 7. Download and decrypt the build output
+
+Once the upload step finishes, open the workflow run under the [Actions tab](https://github.com/jgfPereira/unix-runner/actions). In its **Artifacts** section, select the entry matching the platform, such as `macos-arm64-build`.
+
+The browser downloads a GitHub ZIP archive containing the encrypted file **`artifact.zip.enc`**. Extract that outer ZIP, then decrypt `artifact.zip.enc` using the same passphrase as `ZIP_PASSWORD`. If you prefer the GitHub CLI, it extracts the GitHub wrapper automatically:
+
+```bash
+# Run on your local computer; replace RUN_ID with the completed run ID.
+gh run download RUN_ID --repo jgfPereira/unix-runner \
+  -n macos-arm64-build -D ./downloaded
+```
+
+Then decrypt and extract the inner ZIP:
+
+```bash
+cd downloaded
+openssl enc -d -aes-256-cbc -pbkdf2 \
+  -in artifact.zip.enc -out artifact.zip
+unzip artifact.zip -d output
+```
+
+OpenSSL prompts for the passphrase. The resulting `output/` folder contains your staged files. For more details, including **Windows PowerShell**, see [Retrieving and decrypting the build](#4-retrieve-and-decrypt-a-build).
+
+**Optional fallback: SCP/SFTP.** You can still transfer an individual file directly from an active Upterm session, although the public relay can intermittently stall:
+
+```bash
+# Run locally, using the exact session ID and absolute path on the runner.
 scp -o ServerAliveInterval=30 -l 8192 \
   '<SESSION_ID>@uptermd.upterm.dev:/ABSOLUTE/PATH/TO/ARTIFACT.zip' .
 ```
 
-Modern OpenSSH uses SFTP for SCP transfers by default; **no `-O` option is needed in the standard command**. Some older or differently configured Upterm/SSH endpoints may require **legacy SCP mode**, which can be enabled by adding `-O` if the default transfer fails with an SFTP-related error. Conversely, if `-O` causes a transfer failure, leave it out. Use the transfer mode that works with your session and client.
+Modern OpenSSH normally uses SFTP for `scp`; **do not add `-O` by default**. The `-O` flag selects legacy SCP mode and may help with certain older endpoints, but it can fail in other Upterm configurations. `-l 8192` limits bandwidth to 8,192 Kbit/s (around 1 MiB/s). The GitHub Actions artifact method is preferred when SCP/SFTP is unreliable.
 
-The `-l 8192` option caps bandwidth at **8,192 Kbit/s** (about 1 MiB/s), not a speed guarantee. Omit `-l 8192` if you do not want a bandwidth limit.
+---
+
+## Encrypted build artifacts
+
+GitHub Actions workflow artifacts provide a **second, more reliable delivery path** for the output of your interactive builds. These are different from the **GitHub Release asset** that supplies the *input payload* when a runner starts.
+
+### Why upload through GitHub Actions instead of relying on SCP?
+
+SCP/SFTP access to Upterm traverses a shared public relay. Even when a build succeeds, file transfers can **hang during SFTP initialization, stall partway through a large copy, or fail because the relay connection drops**. Retrying can help, but repeatedly restarting a large download is inconvenient.
+
+The new workflow steps send the encrypted output using **GitHub Actions artifact upload infrastructure**, not through your Upterm SCP/SFTP connection. Once the workflow finishes, you can download the file from the run's Artifacts section (or GitHub CLI) without keeping the SSH session alive.
+
+| | Direct SCP/SFTP | Encrypted workflow artifact |
+|:--|:--|:--|
+| Transfer path | Local client → Upterm relay → runner | Runner → GitHub Actions artifact storage |
+| Requires active Upterm session to retrieve | Yes | No, after upload completes |
+| Behavior during relay disruption | Can hang or disconnect | Download independent of Upterm relay |
+| Preparation | Give local SCP the real remote output path | Copy output to a generic staging directory |
+| Encryption | SSH protects the transfer; downloaded file is otherwise unchanged | ZIP encrypted using `ZIP_PASSWORD` before upload |
+| Availability | While session and runner remain active | Until artifact expires or is removed |
+
+> [!IMPORTANT]
+> **Uploading is optional, not the build itself.** You must create the build and stage its files manually during SSH. If no files are staged, the workflow **warns but does not fail**. An upload is attempted only after the Upterm step finishes or resumes. A job that is cancelled or reaches its timeout may never execute the upload steps.
+
+### 1. Prepare files during the SSH session
+
+The source paths and filenames remain project-specific and are deliberately **not embedded in public workflow YAML**. All four workflows use the same generic location:
+
+```text
+$GITHUB_WORKSPACE/artifact/
+```
+
+**Stage a single file:**
+
+```bash
+mkdir -p "$GITHUB_WORKSPACE/artifact"
+cp "/actual/path/to/compiled-output.zip" \
+  "$GITHUB_WORKSPACE/artifact/output.zip"
+```
+
+**Stage multiple files:**
+
+```bash
+mkdir -p "$GITHUB_WORKSPACE/artifact"
+cp "/path/to/application.AppImage" \
+  "$GITHUB_WORKSPACE/artifact/output.AppImage"
+cp "/path/to/checksums.txt" \
+  "$GITHUB_WORKSPACE/artifact/checksums.txt"
+```
+
+**Stage a macOS application bundle:**
+
+```bash
+mkdir -p "$GITHUB_WORKSPACE/artifact"
+ditto -c -k --keepParent "/path/to/Application.app" \
+  "$GITHUB_WORKSPACE/artifact/output-macos.zip"
+```
+
+`ditto` preserves macOS bundle metadata better than copying a raw `.app` folder into a generic cross-platform ZIP. You may also stage ZIP, DMG, PKG, or other finished files directly. Any output names used above are **illustrative**.
+
+Check the staged contents:
+
+```bash
+ls -lah "$GITHUB_WORKSPACE/artifact"
+du -sh "$GITHUB_WORKSPACE/artifact"
+```
+
+A folder containing **only empty directories** does not count as an artifact; the packaging step checks for at least one file or symlink. Avoid staging symlinks to files outside this directory—copy the actual output instead. Also avoid staging unnecessary private files: everything under `artifact/` is packed.
+
+### 2. Resume the workflow after the build is ready
+
+When all staged copies have finished writing, end the Upterm shell:
+
+```bash
+exit
+```
+
+Alternatively, from within the session:
+
+```bash
+touch "$GITHUB_WORKSPACE/continue"
+```
+
+Both allow subsequent GitHub Actions steps to run. `touch .../continue` can resume the workflow without immediately closing your SSH terminal; **do not** touch it while files are still being built or copied. Disconnecting the client window alone is not the same as ending the hosted session. See [Upterm's continue-workflow documentation](https://github.com/owenthereal/action-upterm#continue-a-workflow).
+
+### 3. What the workflows do automatically
+
+After Upterm, the four workflows run two additional steps:
+
+1. **Package and encrypt staged artifact:** if `artifact/` contains at least one file, create a ZIP in the runner's temporary directory, encrypt it with OpenSSL (`AES-256-CBC`, `PBKDF2`, salted) using `ZIP_PASSWORD`, and save **`artifact.zip.enc`** in the workspace. The temporary plaintext `artifact.zip` is deleted by the step's exit cleanup.
+2. **Upload encrypted build artifact:** `actions/upload-artifact@v4` uploads only `artifact.zip.enc`, with **`compression-level: 0`** because the file is already encrypted. If it does not exist, the action warns instead of failing.
+
+```mermaid
+flowchart LR
+    A[Staged files in artifact directory] --> B[Create artifact.zip]
+    B --> C[Encrypt using ZIP_PASSWORD]
+    C --> D[artifact.zip.enc]
+    D --> E[GitHub Actions Artifacts]
+    E --> F[Download and decrypt locally]
+```
+
+| Situation | Workflow behavior |
+|:--|:--|
+| Non-empty staging directory | ZIP, encrypt, then upload |
+| Missing or empty staging directory | Emit a warning; no artifact is uploaded |
+| Missing `ZIP_PASSWORD` when staging exists | Fail safely; do not upload unencrypted content |
+| ZIP or encryption error | Packaging step fails; no intentional plaintext fallback |
+| Successful upload | Encrypted artifact becomes downloadable from that run |
+
+**Artifact names** identify the platform while keeping the project and original output path private:
+
+| Workflow | GitHub Actions artifact name | File inside |
+|:--|:--|:--|
+| `macos-arm64.yml` | `macos-arm64-build` | `artifact.zip.enc` |
+| `macos-x64.yml` | `macos-x64-build` | `artifact.zip.enc` |
+| `linux-arm64.yml` | `linux-arm64-build` | `artifact.zip.enc` |
+| `linux-x64.yml` | `linux-x64-build` | `artifact.zip.enc` |
+
+> [!NOTE]
+> **No original build path is exposed in the workflow configuration.** Only the generic `artifact/` directory and `artifact.zip.enc` are referenced. The encrypted file hides the staged contents, but its download size, artifact name, and run metadata may remain visible. Avoid printing secret paths or credentials in workflow logs or terminal output that you share.
+
+### 4. Retrieve and decrypt a build
+
+**Method A — GitHub website:**
+
+1. Open the repository's [GitHub Actions page](https://github.com/jgfPereira/unix-runner/actions) and select the completed run.
+2. Find the **Artifacts** section on the run summary, then download the relevant platform artifact, for example `macos-arm64-build`.
+3. Extract the ZIP downloaded by the browser (for example, `macos-arm64-build.zip`). Its contents include **`artifact.zip.enc`**.
+4. Decrypt `artifact.zip.enc` on your own computer, then extract the decrypted `artifact.zip` to access the output.
+
+**Method B — GitHub CLI (recommended for repeat downloads):**
+
+From your local computer, with GitHub CLI authenticated:
+
+```bash
+# Change RUN_ID and platform artifact name as needed.
+gh run download RUN_ID --repo jgfPereira/unix-runner \
+  -n macos-arm64-build -D ./downloaded
+```
+
+The CLI extracts GitHub's outer artifact wrapper automatically, so `./downloaded/artifact.zip.enc` is ready for decryption.
+
+**Linux / macOS shell:**
+
+```bash
+cd downloaded
+openssl enc -aes-256-cbc -d -pbkdf2 \
+  -in artifact.zip.enc -out artifact.zip
+unzip -t artifact.zip
+unzip artifact.zip -d output
+```
+
+**Windows PowerShell:**
+
+```powershell
+# Download and extract GitHub's artifact wrapper automatically.
+gh run download RUN_ID --repo jgfPereira/unix-runner -n macos-arm64-build -D .\downloaded
+
+Set-Location .\downloaded
+openssl enc -aes-256-cbc -d -pbkdf2 -in artifact.zip.enc -out artifact.zip
+Expand-Archive -Path .\artifact.zip -DestinationPath .\output
+```
+
+OpenSSL prompts for the same passphrase configured in the repository secret **`ZIP_PASSWORD`**. The final `output/` folder contains the files you staged. If a staged item is itself a ZIP (e.g., `output-macos.zip`), extract that ZIP separately to access its contents.
+
+> [!TIP]
+> The artifact's name is specific to the runner, but the encrypted filename **always** remains `artifact.zip.enc`. You can inspect the output locally with `unzip -l artifact.zip` after decryption. If you downloaded using the browser, remember to extract its *outer* ZIP before running OpenSSL.
+
+### Availability, privacy, and retention
+
+- **Public repository:** GitHub Actions artifacts can be downloaded by people with read access to the repository. Treat `artifact.zip.enc` as publicly accessible encrypted content and protect the secret with a strong, unique passphrase.
+- **Encryption:** the staged files are ZIP-packaged, then encrypted before upload. The decrypted staging files remain on the *temporary runner* until its workspace is removed; the workflow removes the temporary plaintext ZIP, not the original staged files.
+- **Retention:** the workflows do **not** set `retention-days`, so GitHub's configured repository retention applies. Workflow artifacts expire; download important builds before they are deleted. This is not a permanent release or backup system.
+- **Limits and billing:** GitHub Actions storage and artifact upload limits apply separately from GitHub Releases and Git LFS. Large outputs require sufficient time and storage quota.
+- **Integrity:** OpenSSL `enc` with AES-256-CBC / PBKDF2 does not provide authenticated integrity. For important builds, verify a trusted SHA-256 checksum or a signature in addition to decrypting the file.
 
 ---
 
@@ -257,17 +495,25 @@ GitHub Releases (outside the Git tree)
     └── payload.zip.enc          # Encrypted, publicly downloadable asset
 ```
 
-After a workflow starts, the downloaded encrypted asset and extracted payload appear **in the temporary runner workspace**, not as committed repository files:
+After a workflow starts, the downloaded input payload and the optional staged build output appear **in the temporary runner workspace**, not as committed repository files:
 
 ```text
 $GITHUB_WORKSPACE/
-├── payload.zip.enc
-├── payload.zip                  # Decrypted only on the temporary runner
-└── extracted_files/
-    └── my-project/              # Example; actual layout comes from your ZIP
-        ├── scripts/
-        └── ...
+├── payload.zip.enc              # Encrypted GitHub Release input asset
+├── payload.zip                  # Decrypted input, temporary runner only
+├── extracted_files/
+│   └── my-project/              # Example project and build scripts
+│       └── ...
+├── artifact/                     # Manually staged build outputs (optional)
+│   ├── output.zip               # Generic example name
+│   └── ...
+└── artifact.zip.enc             # Encrypted output uploaded after Upterm
+
+$RUNNER_TEMP/
+└── artifact.zip                 # Temporary plaintext ZIP, cleaned up
 ```
+
+`artifact.zip.enc` is an **Actions workflow artifact**; `payload.zip.enc` is a **GitHub Release input asset**. Their roles, locations, and lifecycle are different.
 
 ## Managing the encrypted payload
 
@@ -514,13 +760,21 @@ APPIMAGE_EXTRACT_AND_RUN=1 appimagetool --version
 file path/to/application.AppImage
 ```
 
-### Archives and diagnostics
+### Archives, staging, and diagnostics
 
 ```bash
 unzip -t payload.zip
 unzip -l payload.zip | head -n 20
 find "$GITHUB_WORKSPACE/extracted_files" -maxdepth 3 -type f | head -n 30
 du -sh "$GITHUB_WORKSPACE/extracted_files"
+
+# Stage a completed build before leaving Upterm.
+mkdir -p "$GITHUB_WORKSPACE/artifact"
+cp "/path/to/output.zip" "$GITHUB_WORKSPACE/artifact/output.zip"
+ls -lah "$GITHUB_WORKSPACE/artifact"
+
+# Resume the workflow when all copies are finished.
+touch "$GITHUB_WORKSPACE/continue"
 df -h
 ```
 
@@ -530,8 +784,13 @@ df -h
 gh workflow list
 gh workflow run macos-arm64.yml --ref main
 gh run list --limit 10
-gh run view <RUN_ID> --log
-gh run cancel <RUN_ID>
+gh run view RUN_ID --log
+
+# Download one completed run's encrypted build artifact.
+gh run download RUN_ID --repo jgfPereira/unix-runner \
+  -n macos-arm64-build -D ./downloaded
+
+gh run cancel RUN_ID
 ```
 
 ---
@@ -583,7 +842,28 @@ Confirm that your **public** SSH key is registered to GitHub user `jgfPereira`, 
 <details>
 <summary><strong>SSH / SFTP connections intermittently hang</strong></summary>
 
-Upterm uses a public relay, so connectivity or forwarding issues can affect SSH/SFTP independently from the build. If the connection closes before key exchange, retry with `ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <SESSION_ID>@uptermd.upterm.dev`, and check that the workflow session is still active. If large transfers stall, try SFTP with fewer outstanding requests (`sftp -R 4 -B 16384 ...`) and use `reget` to resume a partial download. Keepalives cannot fix a stalled relay or a subsystem that still acknowledges SSH probes. For important builds, consider an explicit artifact-upload step as a separate retrieval channel; the current provisioning workflows do not publish build artifacts automatically.
+Upterm uses a public relay, so connectivity or forwarding issues can affect SSH/SFTP independently from the build. If the connection closes before key exchange, retry with `ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3 <SESSION_ID>@uptermd.upterm.dev`, and check that the workflow session is still active. If large transfers stall, try SFTP with fewer outstanding requests (`sftp -R 4 -B 16384 ...`) and use `reget` to resume a partial download. Keepalives cannot fix a stalled relay or a subsystem that still acknowledges SSH probes. **Prefer the built-in encrypted workflow artifact upload**: stage the build in `$GITHUB_WORKSPACE/artifact/`, finish Upterm, and download it from the run's Artifacts section instead of SCP.
+
+</details>
+
+<details>
+<summary><strong>The workflow finished, but no build artifact appeared</strong></summary>
+
+Confirm you copied at least one **file** into `$GITHUB_WORKSPACE/artifact/` **before** ending Upterm. The steps look only in this generic directory; they do not scan `extracted_files/` for outputs. Check the run's **Package and encrypt staged artifact** step for the warning `No build artifact found in artifact/; skipping upload.` Also check **Upload encrypted build artifact**: `if-no-files-found: warn` will not fail the job. If the run was cancelled or hit its 30-minute timeout, post-session steps may not have run at all. Once the temporary runner has been removed, its unstaged build files cannot be recovered from it.
+
+</details>
+
+<details>
+<summary><strong>Artifact upload or encryption fails</strong></summary>
+
+Check the two post-Upterm steps for details. If files were staged but `ZIP_PASSWORD` is missing, the workflow fails rather than upload plaintext. If the ZIP or OpenSSL command fails, inspect available disk space, file permissions, and the step log. If upload fails after encryption, check GitHub Actions availability, workflow artifact limits, storage quota, and artifact permissions. Use an authenticated GitHub account with repository access to download the artifact.
+
+</details>
+
+<details>
+<summary><strong>Downloaded artifact cannot be opened or decrypted</strong></summary>
+
+A browser download is usually an **outer GitHub artifact ZIP**, not the encrypted output itself. Extract it to find `artifact.zip.enc`, then decrypt using the exact `ZIP_PASSWORD` passphrase and `openssl enc -d -aes-256-cbc -pbkdf2`. Extract the resulting `artifact.zip` afterward. `gh run download` already expands the outer GitHub ZIP. If a staged file is itself a ZIP, you will have an additional inner archive to open. Confirm the download was complete and, for critical artifacts, verify a trusted checksum.
 
 </details>
 
@@ -604,17 +884,21 @@ AppImage is intentionally **Linux only**; `APPIMAGE_EXTRACT_AND_RUN=1` supports 
 ## Security and operating considerations
 
 - **Restrict SSH access.** The workflows explicitly allow only the registered keys of `jgfPereira` through Upterm. Do not remove this restriction for jobs containing decrypted artifacts.
-- **Encrypt public Release assets.** The encrypted payload is downloadable by anyone; keep `ZIP_PASSWORD` strong and private, and never upload plaintext archives or decrypted `extracted_files` to public releases/artifacts.
-- **Understand the lifespan.** Hosted runners are temporary. All files and changes not retrieved elsewhere disappear when the job ends.
+- **Encrypt files before public storage.** The GitHub Release input asset and GitHub Actions build output are encrypted with the `ZIP_PASSWORD` passphrase. Keep the password strong, unique, and private. Never upload plaintext build outputs, archives, or credentials to public releases/artifacts.
+- **Stage deliberately.** The workflows upload only encrypted `artifact.zip.enc` but collect everything in `$GITHUB_WORKSPACE/artifact/`. Don't stage secrets or sensitive files accidentally. Original build paths are not hardcoded into the workflows, but artifact names and sizes can still be visible.
+- **Understand the lifespan.** Hosted runners are temporary. All files and changes not retrieved elsewhere disappear when the job ends. Workflow artifacts also expire under the repository's retention policy.
 - **Keep action permissions narrow.** The macOS jobs request `contents: read` and disable persisted checkout credentials. Linux remains container-based. No workflows require LFS checkout or write access to GitHub Releases for downloads.
 - **Manage toolchain drift.** Homebrew formula versions, Go latest-stable, Oracle JDK 25 patch levels, runner images, and `appimagetool` continuous releases can change between runs. Pin versions and action commit SHAs if you require reproducible, audited release builds.
-- **Account for usage and consistency.** GitHub Actions usage and quotas depend on repository visibility and account plan. An active SSH session consumes a running job. The fixed `runner-payload` tag always refers to the currently uploaded asset, so record its checksum when reproducibility matters.
+- **Account for usage and consistency.** GitHub Actions minutes and artifact storage have separate limits from Git LFS and GitHub Release assets. A connected SSH session consumes a running job, and the 30-minute job timeout includes artifact encryption/upload. The fixed `runner-payload` tag always refers to the currently uploaded input asset, so record its checksum when reproducibility matters.
 
 ## Further reading
 
 - [GitHub Actions workflows](https://docs.github.com/en/actions/writing-workflows)
 - [GitHub-hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
 - [Upterm action documentation](https://github.com/owenthereal/action-upterm)
+- [Downloading workflow artifacts](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
+- [GitHub CLI: download workflow artifacts](https://cli.github.com/manual/gh_run_download)
+- [GitHub Actions artifact upload](https://github.com/actions/upload-artifact)
 - [GitHub Releases and asset limits](https://docs.github.com/en/repositories/releasing-projects-on-github/about-releases)
 - [GitHub CLI: create and upload assets](https://cli.github.com/manual/gh_release_upload)
 - [Git LFS removal and historical storage](https://docs.github.com/en/repositories/working-with-files/managing-large-files/removing-files-from-git-large-file-storage)
@@ -626,7 +910,7 @@ AppImage is intentionally **Linux only**; `APPIMAGE_EXTRACT_AND_RUN=1` supports 
 
 <div align="center">
 
-**Build natively. Connect securely. Package for the right architecture.**
+**Build natively. Connect securely. Retrieve encrypted artifacts reliably.**
 
 [Back to top](#top)
 
