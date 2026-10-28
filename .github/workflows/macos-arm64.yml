@@ -20,7 +20,7 @@ jobs:
       SHELL: /bin/zsh
 
     steps:
-      - name: Verify macOS architecture and bootstrap Git LFS / OpenSSL
+      - name: Verify macOS architecture and bootstrap OpenSSL
         run: |
           set -euo pipefail
 
@@ -34,11 +34,6 @@ jobs:
             exit 1
           }
 
-          if ! git lfs version >/dev/null 2>&1; then
-            brew install git-lfs
-          fi
-          git lfs version
-
           openssl_bin="$(brew --prefix openssl@3)/bin/openssl"
           if [[ ! -x "$openssl_bin" ]]; then
             brew install openssl@3
@@ -51,11 +46,23 @@ jobs:
           "$openssl_bin" version
           echo "$(dirname "$openssl_bin")" >> "$GITHUB_PATH"
 
-      - name: Checkout code and Git LFS payload
+      - name: Checkout code
         uses: actions/checkout@v4
         with:
-          lfs: true
           persist-credentials: false
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
+
+      - name: Download encrypted payload from GitHub Release
+        run: |
+          set -euo pipefail
+          release_tag="runner-payload-v1"
+          download_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_tag}/payload.zip.enc"
+
+          curl --fail --location --show-error --silent --retry 3 --retry-delay 5 \
+            --output payload.zip.enc.download "$download_url"
+          test -s payload.zip.enc.download
+          mv -f payload.zip.enc.download payload.zip.enc
 
       - name: Decrypt and test encrypted payload
         env:

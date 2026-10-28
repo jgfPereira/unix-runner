@@ -12,16 +12,27 @@ jobs:
       SHELL: /bin/bash
 
     steps:
-      - name: Install Git, LFS, Unzip, and OpenSSL for Initialization
+      - name: Install Git, Unzip, OpenSSL, and Curl for Initialization
         run: |
           export DEBIAN_FRONTEND=noninteractive
           apt-get update
-          apt-get install -y git git-lfs unzip openssl
+          apt-get install -y git unzip openssl curl ca-certificates
 
       - name: Checkout Code
         uses: actions/checkout@v4
-        with:
-          lfs: true
+        env:
+          GIT_LFS_SKIP_SMUDGE: "1"
+
+      - name: Download encrypted payload from GitHub Release
+        run: |
+          set -euo pipefail
+          release_tag="runner-payload-v1"
+          download_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${release_tag}/payload.zip.enc"
+
+          curl --fail --location --show-error --silent --retry 3 --retry-delay 5 \
+            --output payload.zip.enc.download "$download_url"
+          test -s payload.zip.enc.download
+          mv -f payload.zip.enc.download payload.zip.enc
 
       - name: Decrypt Payload
         run: |
@@ -38,7 +49,7 @@ jobs:
         run: |
           echo "Installing remaining dependencies..."
           export DEBIAN_FRONTEND=noninteractive
-          apt-get install -y maven python3 zip imagemagick curl ca-certificates binutils bash-completion file desktop-file-utils
+          apt-get install -y maven python3 zip imagemagick binutils bash-completion file desktop-file-utils
           
           echo "Downloading and installing appimagetool..."
           curl -L -o /usr/local/bin/appimagetool "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage"
