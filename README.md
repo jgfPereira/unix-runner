@@ -84,7 +84,7 @@ gh secret set ZIP_PASSWORD
 ```
 
 > [!NOTE]
-> The password must match the one used when creating `payload.zip.enc`. Switching from LFS to GitHub Releases does **not** change the encryption format or require decrypting/re-encrypting an existing valid archive. The fixed release tag is `runner-payload`; check that every workflow uses that tag, **not `runner-payload-v1`**.
+> The password must match the one used when creating `payload.zip.enc`. Switching from LFS to GitHub Releases does **not** change the encryption format or require decrypting/re-encrypting an existing valid archive. The fixed release tag is `runner-payload`.
 
 ### 2. Start a machine
 
@@ -283,7 +283,7 @@ The payload is maintained **separately from the Git repository** as an asset on 
 | Decryption secret | GitHub Actions repository secret **`ZIP_PASSWORD`** |
 
 > [!IMPORTANT]
-> **Keep the release tag and asset filename unchanged.** The workflows download this specific URL on each run. Updating the asset under the existing tag makes the newest payload available to the next run without changing the workflow files. If your installed workflows still say `release_tag="runner-payload-v1"`, change that line to `release_tag="runner-payload"` in all four workflows **once**.
+> **Keep the release tag and asset filename unchanged.** The workflows download this specific URL on each run. Updating the asset under the existing tag makes the newest payload available to the next run without changing the workflow files.
 
 ### Why we no longer use Git LFS
 
@@ -541,7 +541,7 @@ gh run cancel <RUN_ID>
 <details>
 <summary><strong>Release download fails (404, 403, or empty file)</strong></summary>
 
-Check that the release is **published** and the asset is named exactly `payload.zip.enc`. Verify that all four workflows use `release_tag="runner-payload"` (not `runner-payload-v1`). If an upload with `--clobber` is in progress or failed, the asset may be temporarily missing; check the [release page](https://github.com/jgfPereira/unix-runner/releases/tag/runner-payload) and re-upload from your local backup. The release and asset URL must remain public for the workflows' unauthenticated `curl` download.
+Check that the release is **published** and the asset is named exactly `payload.zip.enc`. Verify that all four workflows use `release_tag="runner-payload"`. If an upload with `--clobber` is in progress or failed, the asset may be temporarily missing; check the [release page](https://github.com/jgfPereira/unix-runner/releases/tag/runner-payload) and re-upload from your local backup. The release and asset URL must remain public for the workflows' unauthenticated `curl` download.
 
 </details>
 
